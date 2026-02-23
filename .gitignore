@@ -1,4 +1,6 @@
+.claude/
 .venv/
-.env
-local_tests
+local_tests/
 __pycache__/
+.env
+gotenberg/fonts/*

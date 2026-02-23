@@ -13,8 +13,10 @@ dependencies = [
     "dotenv",
     "clevercsv",
     "httpx",
-    "markdownify",
     "markdown",
+    "openai",
+    "fastapi",
+    "python-multipart"
 ]
 
 [build-system]

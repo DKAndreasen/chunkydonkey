@@ -8,6 +8,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    poppler-utils ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install 'uv'
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
@@ -26,4 +31,4 @@ COPY src ./src
 EXPOSE 5000
 
 # We use src.main because the file is located at /app/src/main.py
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "5000"]
+CMD ["uvicorn", "src.fatingest.main:app", "--host", "0.0.0.0", "--port", "5000"]

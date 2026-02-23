@@ -1,56 +1,52 @@
 # src/fatingest/vlm.py
 
-import os
 import base64
+import os
 import httpx
-from pathlib import Path
 from openai import OpenAI
 
-# Config fra environment
-BASE_URL = os.getenv("VLM_BASE_URL", "http://localhost:11434/v1")
-API_KEY = os.getenv("VLM_API_KEY", "ollama")
-MODEL = os.getenv("VLM_MODEL", "qwen2.5-vl:7b")
-TIMEOUT = float(os.getenv("VLM_TIMEOUT", "300")) # 5 min default for VLM
+
+BASE_URL = os.getenv("VLM_API_URL", "http://localhost:11434/v1")
+API_KEY = os.getenv("VLM_API_KEY", "__CHANGE_ME__")
+MODEL = os.getenv("VLM_MODEL", "Qwen/Qwen3-VL-8B-Instruct-FP8")
+CONNECT_TIMEOUT = float(os.getenv("VLM_CONNECT_TIMEOUT", "30"))
+RESPONSE_TIMEOUT = float(os.getenv("VLM_RESPONSE_TIMEOUT", "300"))
+
 
 client = OpenAI(
     base_url=BASE_URL,
     api_key=API_KEY,
-    timeout=httpx.Timeout(TIMEOUT, connect=10.0), # long read timeout, short connect
+    timeout=httpx.Timeout(RESPONSE_TIMEOUT, connect=CONNECT_TIMEOUT),
 )
 
 
-def encode_image(image_path: str | Path) -> tuple[str, str]:
-    """Returnerer (base64_data, media_type)"""
-    path = Path(image_path)
-    suffix = path.suffix.lower()
-    media_types = {
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".png": "image/png",
-        ".gif": "image/gif",
-        ".webp": "image/webp",
-    }
-    media_type = media_types.get(suffix, "image/jpeg")
-    
-    with open(path, "rb") as f:
-        return base64.b64encode(f.read()).decode("utf-8"), media_type
-
-
-def analyze_image(image_path: str | Path, prompt: str = "Beskriv dette billede.") -> str:
-    base64_data, media_type = encode_image(image_path)
-    
+async def image_to_text(image_bytes: bytes, prompt: str) -> str:
+    """
+    Sends image bytes and prompt to VLM, returns response text.
+    """
+    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
     response = client.chat.completions.create(
         model=MODEL,
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{media_type};base64,{base64_data}"},
-                },
-            ],
-        }],
-        max_tokens=1024,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
+                ],
+            }
+        ],
+        temperature=0,
+        top_p=1.0,
+        max_tokens=4096,
+        #extra_body={"repetition_penalty": 1.1},
+        extra_body={
+            #"repetition_penalty": 1.1,
+            "top_k": 1,
+            "mm_processor_kwargs": {
+                "max_pixels": 4096 * 32 * 32,  # 4,194,304  -> tillad ~2048x2048
+                "min_pixels": 256 * 32 * 32,   # valgfrit
+            },
+        },
     )
-    return response.choices[0].message.content
+    return response.choices[0].message.content or ""

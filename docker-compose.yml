@@ -3,9 +3,6 @@ services:
   qdrant:
     image: qdrant/qdrant:latest
     container_name: qdrant
-    ports:
-      - "6333:6333" # HTTP API
-      - "6334:6334" # GRPC
     volumes:
       - qdrant_data:/qdrant/storage
     deploy:
@@ -18,61 +15,20 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
-  
-
-  # --- Infinity ---
-  infinity:
-    image: michaelf34/infinity:latest
-    container_name: infinity
-    runtime: nvidia
-    ipc: host
-    environment:
-      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
-    volumes:
-      - hf_cache:/root/.cache/huggingface
-    command: >
-      v2
-      --model-id ${EMBEDDING_MODEL_ID}
-      --served-model-name embed
-      --model-id ${RERANK_MODEL_ID}
-      --served-model-name rerank
-      --port 8001
-      --batch-size 32
-      --device cuda
-      --permissive-cors
-      --url-prefix /v1
-    ports:
-      - "8001:8001"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-    restart: unless-stopped
 
 
-# --- PostgreSQL ---
+  # --- PostgreSQL ---
   postgres:
     image: postgres:16-alpine
     container_name: postgres
     environment:
-      POSTGRES_USER: ${DB_USER:-fatingest}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-__CHANGE_ME__}
-      POSTGRES_DB: ${DB_NAME:-fatingest}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
-    # Wait for DB to be up
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-fatingest} -d ${DB_NAME:-fatingest}"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -87,16 +43,12 @@ services:
   minio:
     image: minio/minio:latest
     container_name: minio
-    # Init server with /data path
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-fatingest}
-      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-__CHANGE_ME__}
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY}
     volumes:
       - minio_data:/data
-    ports:
-      - "9000:9000" # S3 API Port
-      - "9001:9001" # Web Console
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 10s
@@ -105,19 +57,17 @@ services:
     restart: unless-stopped
 
 
-# --- Faster Whisper Server ---
+  # --- Faster Whisper Server ---
   whisper:
     image: fedirz/faster-whisper-server:latest-cuda
     container_name: whisper
     runtime: nvidia
     environment:
-      - WHISPER__MODEL=large-v3-turbo  # CHANGE TO large-v3 WHEN L40S
-      - WHISPER__COMPUTE_TYPE=int8  # CHANGE TO float16 WHEN L40S IF POOR PERFORMANCE
+      - WHISPER__MODEL=${WHISPER_MODEL}
+      - WHISPER__COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE}
       - WHISPER__INFERENCE_DEVICE=cuda
     volumes:
       - hf_cache:/root/.cache/huggingface
-    ports:
-      - "8000:8000"
     deploy:
       resources:
         reservations:
@@ -126,52 +76,107 @@ services:
               count: 1
               capabilities: [gpu]
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
       interval: 10s
       timeout: 5s
       retries: 10
     restart: unless-stopped
 
 
-# --- Gotenberg ---
-services:
+  # --- Gotenberg ---
   gotenberg:
-    image: gotenberg/gotenberg:8
-    ports:
-      - "3000:3000"
+    build:
+      context: .
+      dockerfile: gotenberg/Dockerfile
+    image: gotenberg-custom:8
+    container_name: gotenberg
+    environment:
+      - GOTENBERG_API_TIMEOUT=120s
+      - GOTENBERG_LIBREOFFICE_RESTART_AFTER=100
+      - GOTENBERG_LIBREOFFICE_AUTO_START=true
+      - GOTENBERG_CHROMIUM_RESTART_AFTER=100
+      - GOTENBERG_CHROMIUM_AUTO_START=true
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+
+  # --- Vision LLM (vLLM) ---
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: vllm
+    runtime: nvidia
+    environment:
+      - TORCH_CUDA_ARCH_LIST=8.9
+    command: >
+      --model ${VLM_MODEL}
+      --max-model-len 12288
+      --gpu-memory-utilization 0.9
+      --generation-config vllm
+  #--trust-remote-code
+  #--dtype float16
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v1/models"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
 
 
   # --- Fatingest ---
   fatingest:
-    build: 
+    build:
       context: .
       dockerfile: Dockerfile
     container_name: fatingest
-    runtime: nvidia
     environment:
       - PYTHONPATH=/app
-      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-      - VISION_API_URL=http://vllm:8000/v1/chat/completions
-      - VISION_MODEL_NAME=${VISION_MODEL_ID}
+      # Vision
+      - VLM_API_URL=http://vllm:8000/v1
+      - VLM_API_KEY=${VLM_API_KEY}
+      - VLM_MODEL=${VLM_MODEL}
+      - VLM_CONNECT_TIMEOUT=${VLM_CONNECT_TIMEOUT}
+      - VLM_RESPONSE_TIMEOUT=${VLM_RESPONSE_TIMEOUT}
+      # Embedding
       - EMBEDDING_API_URL=http://infinity:8001
+      # Qdrant
       - QDRANT_URL=http://qdrant:6333
+      # PostgreSQL
       - DB_HOST=postgres
       - DB_PORT=5432
-      - DB_USER=${DB_USER:-fatingest}
-      - DB_PASSWORD=${DB_PASSWORD:-__CHANGE_ME__}
-      - DB_NAME=${DB_NAME:-fatingest}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+      # S3/MinIO
       - S3_ENDPOINT=http://minio:9000
-      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-fatingest}
-      - S3_SECRET_KEY=${S3_SECRET_KEY:-__CHANGE_ME__}
-      - S3_REGION=${S3_REGION:-eu-north-1}
-      - DOCLING_URL=http://docling:5001
-      - DOCLING_API_KEY=${DOCLING_API_KEY:-__CHANGE_ME__}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY}
+      - S3_SECRET_KEY=${S3_SECRET_KEY}
+      - S3_REGION=${S3_REGION}
+      # Whisper
       - WHISPER_URL=http://whisper:8000
+      # Gotenberg
+      - GOTENBERG_URL=http://gotenberg:3000
     volumes:
       - hf_cache:/root/.cache/huggingface
       - ./src:/app/src
     ports:
-      - "5000:5000"
+      - "${FATINGEST_PORT}:5000"
     depends_on:
       qdrant:
         condition: service_healthy
@@ -179,11 +184,18 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
-      docling:
+      whisper:
         condition: service_healthy
-      infinity:
+      gotenberg:
         condition: service_healthy
-    command: ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "5000", "--reload"]
+      vllm:
+        condition: service_healthy
+    command: ["uvicorn", "src.fatingest.main:app", "--host", "0.0.0.0", "--port", "5000", "--reload"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:5000/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
 
@@ -192,4 +204,4 @@ volumes:
   qdrant_data:
   postgres_data:
   minio_data:
-  docling_cache:
+  ollama_data:

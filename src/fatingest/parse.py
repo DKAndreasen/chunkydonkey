@@ -1,9 +1,9 @@
 # src/fatingest/parse.py
 
 import asyncio
-import base64
 import clevercsv
 import filetype
+import glob
 import gzip
 import httpx
 import io
@@ -12,19 +12,28 @@ import markdown as md
 import math
 import os
 import polars as pl
+import re
 import tarfile
+import tempfile
 import zipfile
 
 from .blobstorage import BlobStorage
-from bs4 import BeautifulSoup
-from markdownify import MarkdownConverter
+from .vlm import image_to_text
 from typing import BinaryIO
 
 
 MARKDOWN_CACHE_BUCKET = "markdown-cache"
 
+
 logger = logging.getLogger()
-storage = BlobStorage() # CALL ENSURE BUCKET !!!
+storage = BlobStorage()
+
+
+async def init_parse():
+    """
+    Initialize storage bucket for markdown cache.
+    """
+    await storage.ensure_bucket(MARKDOWN_CACHE_BUCKET)
 
 
 async def parse(file_bytes: bytes | BinaryIO, file_name: str, use_cache: bool = True) -> list[dict]:
@@ -168,7 +177,7 @@ async def parse_to_markdown(file_bytes: bytes, file_name: str) -> dict:
 
         # Document
         if file_type.extension in ('pdf', 'doc', 'docx', 'ppt', 'pptx', 'odp'):
-            markdown = await document_to_markdown(file_bytes, file_name, file_type.extension)
+            markdown = await document_to_markdown(file_bytes, file_name, file_type.extension, file_type.mime)
             return {'file_name': file_name, 'content_type': file_type.mime, 'markdown': markdown}
     
     # Duck-based
@@ -208,7 +217,8 @@ async def text_to_markdown(file_bytes: bytes, file_name: str, file_ext: str) -> 
     try: # Text-based?
         text = file_bytes.decode('utf-8')
         text = md.markdown(text)
-        markdown = await document_to_markdown(text.encode('utf-8'), file_name, file_ext)
+        # UNFINISHED
+        markdown = "" # await document_to_markdown(text.encode('utf-8'), file_name, file_ext)
     except:
         return ""
     return markdown
@@ -279,9 +289,9 @@ async def csv_to_markdown(file_bytes: bytes) -> str:
             ignore_errors=True,          # Skip malformed rows
             truncate_ragged_lines=True,  # Handle uneven row lengths
         )
-        return await df_to_markdown(df)
     except Exception:
         return ""
+    return await df_to_markdown(df)
 
 
 async def df_to_markdown(df: pl.DataFrame) -> str:
@@ -305,6 +315,21 @@ async def df_to_markdown(df: pl.DataFrame) -> str:
                 # Stringify remaining lists
                 else:
                     df = df.with_columns(pl.col(col).list.join(", "))
+    # Add row index column
+    df = df.with_columns(pl.int_range(1, df.height + 1).alias("RowID")).select(
+        ["RowID"] + df.columns
+    )
+    # Sanitize
+    df = df.with_columns([
+        pl.col(c)
+          .cast(pl.Utf8, strict=False)
+          .fill_null("")
+          .str.replace_all(r"\s+", " ")
+          .str.replace_all(r"\|", "¦")
+          .str.strip_chars()
+          .alias(c)
+        for c in df.columns
+    ])
     return df.to_pandas().to_markdown(index=False)
 
 
@@ -313,8 +338,8 @@ async def audio_to_markdown(file_bytes: bytes, file_name: str, content_type: str
     Transcribes audio/video using Whisper and returns markdown table.
     """
     try:
+        # Run Whisper
         endpoint = os.environ.get("WHISPER_URL", "http://whisper:8000").rstrip("/")
-        
         async with httpx.AsyncClient(timeout=None) as client:
             response = await client.post(
                 f"{endpoint}/v1/audio/transcriptions",
@@ -322,36 +347,30 @@ async def audio_to_markdown(file_bytes: bytes, file_name: str, content_type: str
                 data={
                     'response_format': 'verbose_json',
                     'hallucination_silence_threshold': '2.0',
-                    #'vad_filter': 'true', # causes hallucinations :(
-                    #'language': 'da', # too restrictive, auto-detect is better
+                    #'vad_filter': 'true', # too many hallucinations :(
                 },
             )
             response.raise_for_status()
             result = response.json()
-        
+        # Retrieve segments
         segments = result.get('segments', [])
         if not segments:
             logger.warning(f"No segments returned from Whisper for {file_name}")
             return ""
-        
         # Merge segments adaptively to minute boundaries
         merged = merge_to_adaptive_minutes(segments, min_duration=30.0)
-        
-        # Build markdown table
-        rows = [
-            f"| {i} | {format_timestamp(seg['start'])} - {format_timestamp(seg['end'])} | {seg['text'].strip()} |"
-            for i, seg in enumerate(merged, 1)
-        ]
-        
-        header = "| IDX | Tid | Tekst |\n|-|-|-|"
-        return header + "\n" + "\n".join(rows)
-        
+        # Build data frame
+        df = pl.DataFrame({
+            "Time": [f"{format_timestamp(s['start'])} - {format_timestamp(s['end'])}" for s in merged],
+            "Speech": [s["text"] for s in merged],
+        })
     except httpx.HTTPError as e:
         logger.warning(f"HTTP error transcribing {file_name}: {e}")
         return ""
     except Exception as e:
         logger.warning(f"Failed transcribing audio {file_name}: {e}")
         return ""
+    return await df_to_markdown(df)
 
 
 def merge_to_adaptive_minutes(segments: list[dict], min_duration: float = 30.0, interval: float = 60.0) -> list[dict]:
@@ -360,19 +379,15 @@ def merge_to_adaptive_minutes(segments: list[dict], min_duration: float = 30.0, 
     - Always merge until exceeding next whole minute from buffer start
     - After flush, next buffer must be min_duration AND exceed the next whole minute after that
     """
-    
     merged = []
     buffer_segments = []
     buffer_start = 0.0
-    
     for seg in segments:
         buffer_segments.append(seg)
         buffer_end = seg['end']
         buffer_duration = buffer_end - buffer_start
-        
         # Next whole minute from buffer start
         next_minute_from_start = math.ceil(buffer_start / interval) * interval
-        
         # Have we exceeded that minute?
         if buffer_end > next_minute_from_start:
             # Do we also have minimum duration?
@@ -380,7 +395,6 @@ def merge_to_adaptive_minutes(segments: list[dict], min_duration: float = 30.0, 
                 # What's the next whole minute after (start + min_duration)?
                 min_end = buffer_start + min_duration
                 next_minute_after_min = math.ceil(min_end / interval) * interval
-                
                 # Have we exceeded that minute too?
                 if buffer_end >= next_minute_after_min:
                     # Flush buffer
@@ -390,11 +404,9 @@ def merge_to_adaptive_minutes(segments: list[dict], min_duration: float = 30.0, 
                         'text': ' '.join(s['text'].strip() for s in buffer_segments)
                     }
                     merged.append(merged_seg)
-                    
                     # Reset for next buffer
                     buffer_start = buffer_end
                     buffer_segments = []
-    
     # Flush remaining
     if buffer_segments:
         buffer_end = buffer_segments[-1]['end']
@@ -404,7 +416,6 @@ def merge_to_adaptive_minutes(segments: list[dict], min_duration: float = 30.0, 
             'text': ' '.join(s['text'].strip() for s in buffer_segments)
         }
         merged.append(merged_seg)
-    
     return merged
 
 
@@ -461,6 +472,8 @@ async def normalize_audio(file_bytes: bytes, file_name: str) -> bytes:
         )
         stdout, stderr = await process.communicate(input=file_bytes)
         if process.returncode != 0:
+            process.kill()
+            await process.wait()
             error_msg = stderr.decode('utf-8', errors='ignore')
             logger.warning(f"ffmpeg failed for {file_name} (code {process.returncode}): {error_msg}")
             return b""
@@ -470,7 +483,7 @@ async def normalize_audio(file_bytes: bytes, file_name: str) -> bytes:
         return b""
 
 
-async def normalize_image(file_bytes: bytes, file_name: str) -> bytes:
+async def normalize_image(file_bytes: bytes, file_name: str, max_w: int = 2048, max_h: int = 2048) -> bytes:
     """
     Accepts (almost) any image format and returns PNG bytes.
     """
@@ -481,8 +494,10 @@ async def normalize_image(file_bytes: bytes, file_name: str) -> bytes:
         '-i', 'pipe:0',                     # Read from stdin
         '-map', '0:v:0',                    # Get first stream (video)
         '-frames:v', '1',                   # Get 1 frame only (for GIF/video)
+        '-vf', f"scale='min({max_w},iw)':'min({max_h},ih)':force_original_aspect_ratio=decrease",
         '-f', 'image2pipe',                 # Send image-bytes to pipe
         '-vcodec', 'png',                   # Output as PNG
+        '-pix_fmt', 'rgb24',                # 8-bit, no alpha
         'pipe:1'                            # Write to stdout
     ]
     try:
@@ -490,11 +505,20 @@ async def normalize_image(file_bytes: bytes, file_name: str) -> bytes:
             *cmd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await process.communicate(input=file_bytes)
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(input=file_bytes),
+                timeout=10,
+            )
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            logger.warning(f"ffmpeg timeout for {file_name}")
+            return b""
         if process.returncode != 0:
-            error_msg = stderr.decode('utf-8', errors='ignore')
+            error_msg = stderr.decode("utf-8", errors="ignore")
             logger.warning(f"ffmpeg failed for {file_name} (code {process.returncode}): {error_msg}")
             return b""
         return stdout
@@ -503,23 +527,195 @@ async def normalize_image(file_bytes: bytes, file_name: str) -> bytes:
         return b""
 
 
-async def document_to_markdown(file_bytes: bytes, file_name: str, file_ext: str) -> str:
+async def document_to_markdown(
+    file_bytes: bytes,
+    file_name: str,
+    file_ext: str,
+    content_type: str,
+    page_interval: int = 25
+) -> str:
     """
     Attempts to parse document through PDF > PNG > VLM and returns markdown.
     """
-    return ""
+    if file_ext == 'pdf':
+        pdf_bytes = file_bytes
+    else:
+        pdf_bytes = await document_to_pdf(file_bytes, file_name, file_ext, content_type)
+    if not pdf_bytes:
+        return ""
+    num_pages = await pdf_num_pages(pdf_bytes, file_name)
+    if not num_pages:
+        return ""
+    # parse pages in chunks
+    chunks: list[str] = []
+    for start in range(1, num_pages + 1, page_interval):
+        end = min(start + page_interval - 1, num_pages)
+        images = await pdf_to_images(
+            pdf_bytes,
+            file_name,
+            f=start,
+            l=end,
+            max_h=2048
+        )
+        if not images:
+            continue
+        # OCR each page image
+        for idx, image_bytes in enumerate(images, start=start):
+            markdown = await image_to_markdown(image_bytes, f"{file_name}#p{idx}")
+            chunks.append(f"<!--page:{idx}-->")
+            chunks.append(markdown)
+    return "\n\n".join(chunks)
 
 
-async def document_to_pdf(file_bytes: bytes, file_ext: str) -> bytes | None:
+async def pdf_num_pages(file_bytes: bytes, file_name: str, timeout: int = 5) -> int:
     """
-    Attempts to convert document to pdf using Gotenberg, returning bytes or None.
+    Attempts to determine the number of pages in given pdf file, or 0 if unsuccessful.
     """
-    return None
+    cmd = ["pdfinfo", "-"]
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(input=file_bytes),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            logger.warning(f"pdfinfo timeout for {file_name}")
+            return 0
+        if process.returncode != 0:
+            logger.warning(
+                f"pdfinfo failed for {file_name} (code {process.returncode}): "
+                f"{stderr.decode('utf-8', errors='ignore')}"
+            )
+            return 0
+        text = stdout.decode("utf-8", errors="ignore")
+        m = re.search(r"^Pages:\s+(\d+)\s*$", text, re.MULTILINE)
+        return int(m.group(1)) if m else 0
+    except Exception as e:
+        logger.warning(f"Failed reading PDF pages for {file_name}: {e}")
+        return 0
+
+
+async def pdf_to_images(
+    file_bytes: bytes,
+    file_name: str,
+    f: int | None = None,
+    l: int | None = None,
+    max_w: int | None = None, 
+    max_h: int | None = None, 
+    timeout: int = 30
+) -> list[bytes]:
+    """
+    Converts given PDF bytes to a list of per-page PNG bytes using pdftoppm.
+    """
+    try:
+        with tempfile.TemporaryDirectory(prefix="pdftoppm_") as tmpdir:
+            out_prefix = os.path.join(tmpdir, "page")
+            cmd = ["pdftoppm"]
+            if f is not None:
+                cmd += ["-f", str(f)]
+            if l is not None:
+                cmd += ["-l", str(l)]
+            cmd += ["-png"]
+            if max_h is not None:
+                cmd += ["-scale-to-y", str(max_h)]
+            if max_w is not None:
+                cmd += ["-scale-to-x", str(max_w)]
+            cmd += [
+                "-",         # Read PDF from stdin
+                out_prefix,  # Output prefix for file names
+            ]
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,  # unused, but capture anyway
+                stderr=asyncio.subprocess.PIPE
+            )
+            try:
+                _, stderr = await asyncio.wait_for(
+                    process.communicate(input=file_bytes),
+                    timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+                logger.warning(f"pdftoppm timeout for {file_name}")
+                return []
+            if process.returncode != 0:
+                error_msg = stderr.decode("utf-8", errors="ignore")
+                logger.warning(f"pdftoppm failed for {file_name} (code {process.returncode}): {error_msg}")
+                return []
+            # Collect and sort output images by page number
+            paths = glob.glob(os.path.join(tmpdir, "page-*.png"))
+            def page_num(path: str) -> int:
+                m = re.search(r"page-(\d+)\.png$", path)
+                return int(m.group(1)) if m else 10**9
+            paths.sort(key=page_num)
+            images: list[bytes] = []
+            for p in paths:
+                with open(p, "rb") as i:
+                    images.append(i.read())
+            return images
+    except Exception as e:
+        logger.warning(f"Failed converting PDF to images {file_name}: {e}")
+        return []
+
+
+async def document_to_pdf(file_bytes: bytes, file_name: str, file_ext: str, content_type: str) -> bytes | None:
+    """
+    Attempts to convert document (doc, docx, ppt, pptx, odp, odt) to pdf using Gotenberg, returning bytes or None.
+    """
+    endpoint = os.environ.get("GOTENBERG_URL", "http://gotenberg:3000").rstrip("/")
+    form_name = file_name if file_name else f"document.{file_ext}"
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
+            response = await client.post(
+                f"{endpoint}/forms/libreoffice/convert",
+                files={'files': (form_name, file_bytes, content_type)},
+            )
+            response.raise_for_status()
+            return response.content
+    except httpx.TimeoutException as e:
+        logger.warning(f"Timeout converting {file_name} to PDF: {e}")
+        return None
+    except httpx.HTTPStatusError as e:
+        logger.warning(f"HTTP {e.response.status_code} converting {file_name} to PDF: {e.response.text[:200]}")
+        return None
+    except Exception as e:
+        logger.warning(f"Failed converting {file_name} to PDF: {e}")
+        return None
 
 
 async def image_to_markdown(file_bytes: bytes, file_name: str) -> str:
     """
-    Attempts to perform OCR including image description(s) using VLM and returns markdown.
+    Attempts to perform OCR and/or image description using VLM and returns markdown.
     """
     file_bytes = await normalize_image(file_bytes, file_name)
-    return ""
+    if not file_bytes:
+        return ""
+    prompt = (
+        "Udfør perfekt OCR på den givne side og returner meningsfuldt indhold formatteret som markdown, intet andet.\n"
+        "Organiser rækkefølgen af indholdet, så det respekterer flowets retning i diagrammer og tabulære relationer.\n"
+        #"Ophæv brudte linjer og delte ord.\n"
+        #"Anvend overskrifter, GFM-tabeller og lister for at strukturere indholdet, og ophæv brudte linjer og delte ord.\n"
+        "Suppler med ![beskrivelse](image), når billeder kræver uddybning for at forstå sidens indhold.\n"
+        #"Udfør komplet OCR for at konvertere indholdet fra den givne side til præcis markdown-syntaks, intet andet.\n"
+        #"Respekter sidens visuelle flow og læseretning.\n"
+        #"Indsæt en ekstra ![kort beskrivelse](image:[1...n]) efter teksten, når en illustration kræver en ekstra beskrivelse for at forstå sidens indhold.\n"
+        #"Udelad ugenkendeligt og uforståeligt indhold.\n"
+        "Vær opmærksom på, at indholdet kan starte eller slutte abrupt, da den givne side kan være en del af et større dokument.\n"
+        "Hvis der ikke er noget meningsfuldt indhold eller der ikke er givet en side, returner '0', intet andet."
+    )
+    try:
+        result = await image_to_text(file_bytes, prompt)
+        return "" if result.strip() == "0" else result
+    except Exception as e:
+        logger.warning(f"VLM failed for {file_name}: {e}")
+        return ""
