@@ -182,4 +182,7 @@ def pdf_to_chunks(file: bytes):
 
             chunks.append("\n\n".join(parts))
 
-    return chunks, images, doc.metadata or {}
+        meta = {'content_type': 'application/pdf'}
+        meta |= doc.metadata or {}
+
+    return chunks, images, meta

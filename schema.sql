@@ -36,15 +36,16 @@ CREATE INDEX idx_files_unfinished ON files(created_at) WHERE indexed_at IS NULL;
 CREATE TABLE sources (
     source       TEXT NOT NULL,
     source_id    TEXT NOT NULL,
-    sha256       TEXT NOT NULL REFERENCES files(sha256),
-    meta         JSONB DEFAULT '{}',
+    source_meta  JSONB DEFAULT '{}',
+    system_meta  JSONB DEFAULT '{}',
+    file_sha256  TEXT NOT NULL REFERENCES files(sha256),
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     touched_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (source, source_id)
 );
 
 CREATE INDEX idx_sources_source ON sources(source);
-CREATE INDEX idx_sources_sha256 ON sources(sha256);
+CREATE INDEX idx_sources_sha256 ON sources(file_sha256);
 
 -- ============================================================
 -- Chunks: content units

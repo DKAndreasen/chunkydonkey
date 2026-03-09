@@ -62,24 +62,27 @@ def tabular_to_chunks(file: bytes):
         for c in df.columns
     ])
 
-    # Partition into chunks
-    target_chunk_chars = 8000
+    # Partition into chunks and create meta
+    chunks = split_tabular(df)
+    meta |= {"num_rows": df.height, "num_cols": len(df.columns), "columns": df.columns}
+
+    return chunks, meta
+
+
+def split_tabular(df: pl.DataFrame, target_size: int = 8000):
     max_rows = min(100, df.height)
     chunks = []
     start = 0
     while start < df.height:
         chunk_df = df.slice(start, max_rows)
         md = tabular_to_markdown(chunk_df)
-        if len(md) > target_chunk_chars and chunk_df.height > 1:
-            max_rows = max(1, int(chunk_df.height * target_chunk_chars / len(md)))
+        if len(md) > target_size and chunk_df.height > 1:
+            max_rows = max(1, int(chunk_df.height * target_size / len(md)))
             continue
         chunks.append(md)
         start += chunk_df.height
-        max_rows = min(100, df.height - start)
-
-    meta |= {"num_rows": df.height, "num_cols": len(df.columns), "columns": df.columns}
-
-    return chunks, meta
+        max_rows = max(1, min(100, df.height - start))
+    return chunks
 
 
 def flatten_df(df: pl.DataFrame) -> pl.DataFrame:

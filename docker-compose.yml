@@ -95,6 +95,11 @@ services:
       - GOTENBERG_URL=http://gotenberg:3000
       - BROWSERLESS_URL=ws://browserless:3000
       - S3_ENDPOINT_URL=http://seaweedfs:8333
+      - VLM_BASE_URL=${VLM_BASE_URL:-}
+      - VLM_API_KEY=${VLM_API_KEY:-}
+      - VLM_MODEL=${VLM_MODEL:-}
+      - VLM_CONNECT_TIMEOUT=${VLM_CONNECT_TIMEOUT:-30}
+      - VLM_RESPONSE_TIMEOUT=${VLM_RESPONSE_TIMEOUT:-300}
       - MAX_FILE_SIZE=104857600
       - API_KEY=${CHUNKYDONKEY_API_KEY:-}
     volumes:

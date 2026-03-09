@@ -3,7 +3,7 @@ import re
 
 
 MD_IMAGE_RE = re.compile(r'!\[([^\]]*)\]\(([^)]+)\)')
-SECTION_RE = re.compile(r'\n(?=#)')
+SEPARATORS = [r'\n(?=#)', r'\n\n', r'\n', r'\. ', r' ']
 
 
 def markdown_to_chunks(file: bytes):
@@ -28,41 +28,36 @@ def markdown_to_chunks(file: bytes):
     markdown = MD_IMAGE_RE.sub(replacer, markdown)
     chunks = split_markdown(markdown)
 
-    return chunks, images
+    return chunks, images, {'content_type': 'text/markdown'}
 
 
 def split_markdown(text: str, target_size: int = 4000) -> list[str]:
     if len(text) <= target_size:
         return [text]
 
-    # Split into sections at headers, then accumulate to target size
-    sections = SECTION_RE.split(text)
-    chunks = []
+    # Phase 1: split oversized chunks with increasingly fine separators
+    chunks = [text]
+    for sep in SEPARATORS:
+        result = []
+        for chunk in chunks:
+            if len(chunk) <= target_size:
+                result.append(chunk)
+                continue
+            parts = re.split(f'({sep})', chunk)
+            for part in parts:
+                result.append(part)
+        chunks = result
+
+    # Phase 2: merge small chunks up to target size
+    merged = []
     current = ""
-    for section in sections:
-        if current and len(current) + len(section) > target_size:
-            chunks.append(current.strip())
-            current = section
-        else:
-            current = current + section if current else section
-    if current.strip():
-        chunks.append(current.strip())
-
-    # If any chunk is still too large, split on paragraphs
-    result = []
     for chunk in chunks:
-        if len(chunk) <= target_size:
-            result.append(chunk)
-            continue
-        paragraphs = chunk.split("\n\n")
-        current = ""
-        for para in paragraphs:
-            if current and len(current) + len(para) + 2 > target_size:
-                result.append(current.strip())
-                current = para
-            else:
-                current = current + "\n\n" + para if current else para
-        if current.strip():
-            result.append(current.strip())
+        if current and len(current) + len(chunk) > target_size:
+            merged.append(current.strip())
+            current = chunk
+        else:
+            current = current + chunk if current else chunk
+    if current.strip():
+        merged.append(current.strip())
 
-    return result
+    return merged

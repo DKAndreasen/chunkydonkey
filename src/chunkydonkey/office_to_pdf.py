@@ -11,7 +11,7 @@ GOTENBERG_URL = os.getenv("GOTENBERG_URL", "http://gotenberg:3000")
 async def office_to_pdf(file: bytes, ft) -> tuple[bytes, dict]:
     endpoint = f"{GOTENBERG_URL}/forms/libreoffice/convert"
     form_name = f"document.{ft.extension}"
-    meta = office_meta(file)
+    meta = office_meta(file, ft)
     file = inject_table_borders(file, ft.extension)
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
@@ -80,9 +80,9 @@ def inject_table_borders(file: bytes, extension: str) -> bytes:
     return out.getvalue()
 
 
-def office_meta(file: bytes) -> dict:
+def office_meta(file: bytes, ft) -> dict:
     """Extract metadata from modern office formats (.docx, .xlsx, .pptx) via ZIP stdlib."""
-    meta = {}
+    meta = {'content_type': ft.mime}
     try:
         with zipfile.ZipFile(io.BytesIO(file)) as zf:
             # Dublin Core metadata in docProps/core.xml

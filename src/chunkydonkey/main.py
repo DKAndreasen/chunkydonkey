@@ -8,6 +8,7 @@ from fastapi import FastAPI, Form, Header, HTTPException, Query, UploadFile, Fil
 from fastapi.responses import JSONResponse
 
 from . import db
+from .url_to_file import url_to_file
 from .pipeline import process
 
 logger = logging.getLogger(__name__)
@@ -45,8 +46,8 @@ async def post_chunks(
     url: str | None = Form(None),
     file: UploadFile | None = File(None),
     meta: str = Form("{}"),
+    use_cache: bool = Form(True),
     x_api_key: str | None = Header(None),
-    use_cache: bool = Form(True)
 ):
 
     check_api_key(x_api_key)
@@ -56,10 +57,18 @@ async def post_chunks(
     if not source or not source_id:
         raise HTTPException(status_code=400, detail="source and source_id required")
 
+    url = url.strip()
     url = url if url.startswith("http://") or url.startswith("https://") else None
     file = await file.read() if file else None
     if not url and not file:
         raise HTTPException(status_code=400, detail="url or file required")
+
+    # URL route
+    if url and not file:
+        file, resolved_url = await url_to_file(url)
+
+    if url and file:
+        url = None
 
     try:
         meta = json.loads(meta)
@@ -71,6 +80,7 @@ async def post_chunks(
             source=source,
             source_id=source_id,
             source_meta=meta,
+            system_meta=[file.filename if file else url]
             url=url,
             file=file,
             use_cache=use_cache,
