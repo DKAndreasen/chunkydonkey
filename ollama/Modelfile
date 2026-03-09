@@ -1,2 +1,0 @@
-FROM qwen3-vl:30b-a3b-instruct
-PARAMETER num_ctx 8192

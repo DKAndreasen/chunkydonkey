@@ -4,3 +4,4 @@ local_tests/
 __pycache__/
 .env
 gotenberg/fonts/*
+PROJECT.md

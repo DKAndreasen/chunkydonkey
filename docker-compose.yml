@@ -1,87 +1,23 @@
 services:
-  # --- Qdrant ---
-  qdrant:
-    image: qdrant/qdrant:latest
-    container_name: qdrant
-    volumes:
-      - qdrant_data:/qdrant/storage
-    deploy:
-      resources:
-        limits:
-          memory: 16G
-    healthcheck:
-      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/6333'"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-
 
   # --- PostgreSQL ---
   postgres:
-    image: postgres:16-alpine
-    container_name: postgres
+    image: timescale/timescaledb-ha:pg17
+    container_name: chunkydonkey-postgres
+    networks:
+      - internal
     environment:
-      POSTGRES_USER: ${DB_USER}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: chunkydonkey
+      POSTGRES_PASSWORD: chunkydonkey
+      POSTGRES_DB: chunkydonkey
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      test: ["CMD-SHELL", "pg_isready -U chunkydonkey"]
       interval: 5s
-      timeout: 5s
-      retries: 5
-    deploy:
-      resources:
-        limits:
-          memory: 4G
-    restart: unless-stopped
-
-
-  # --- MinIO / S3 ---
-  minio:
-    image: minio/minio:latest
-    container_name: minio
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: ${S3_ACCESS_KEY}
-      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY}
-    volumes:
-      - minio_data:/data
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 10s
-      timeout: 5s
+      timeout: 3s
       retries: 5
     restart: unless-stopped
-
-
-  # --- Faster Whisper Server ---
-  whisper:
-    image: fedirz/faster-whisper-server:latest-cuda
-    container_name: whisper
-    runtime: nvidia
-    environment:
-      - WHISPER__MODEL=${WHISPER_MODEL}
-      - WHISPER__COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE}
-      - WHISPER__INFERENCE_DEVICE=cuda
-    volumes:
-      - hf_cache:/root/.cache/huggingface
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    healthcheck:
-      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-    restart: unless-stopped
-
 
   # --- Gotenberg ---
   gotenberg:
@@ -89,7 +25,9 @@ services:
       context: .
       dockerfile: gotenberg/Dockerfile
     image: gotenberg-custom:8
-    container_name: gotenberg
+    container_name: chunkydonkey-gotenberg
+    networks:
+      - internal
     environment:
       - GOTENBERG_API_TIMEOUT=120s
       - GOTENBERG_LIBREOFFICE_RESTART_AFTER=100
@@ -107,90 +45,73 @@ services:
       retries: 5
     restart: unless-stopped
 
-
-  # --- Vision LLM (vLLM) ---
-  vllm:
-    image: vllm/vllm-openai:latest
-    container_name: vllm
-    runtime: nvidia
+  # --- Browserless (headless Chrome for Playwright) ---
+  browserless:
+    image: ghcr.io/browserless/chromium
+    container_name: chunkydonkey-browserless
+    networks:
+      - internal
     environment:
-      - TORCH_CUDA_ARCH_LIST=8.9
-    command: >
-      --model ${VLM_MODEL}
-      --max-model-len 12288
-      --gpu-memory-utilization 0.9
-      --generation-config vllm
-  #--trust-remote-code
-  #--dtype float16
-    volumes:
-      - hf_cache:/root/.cache/huggingface
+      - TIMEOUT=60000
+      - CONCURRENT=5
     deploy:
       resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+        limits:
+          memory: 2G
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/v1/models"]
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/json/version || exit 1"]
       interval: 10s
       timeout: 5s
-      retries: 10
+      retries: 5
     restart: unless-stopped
 
+  # --- SeaweedFS (S3-compatible blob storage) ---
+  seaweedfs:
+    image: chrislusf/seaweedfs
+    container_name: chunkydonkey-seaweedfs
+    networks:
+      - internal
+    command: "server -master.port=9333 -volume.port=8080 -filer -s3"
+    volumes:
+      - seaweeddata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8333/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
 
-  # --- Fatingest ---
-  fatingest:
+  # --- chunkydonkey API ---
+  api:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: fatingest
+    container_name: chunkydonkey-api
+    networks:
+      - proxy
+      - internal
     environment:
-      - PYTHONPATH=/app
-      # Vision
-      - VLM_API_URL=http://vllm:8000/v1
-      - VLM_API_KEY=${VLM_API_KEY}
-      - VLM_MODEL=${VLM_MODEL}
-      - VLM_CONNECT_TIMEOUT=${VLM_CONNECT_TIMEOUT}
-      - VLM_RESPONSE_TIMEOUT=${VLM_RESPONSE_TIMEOUT}
-      # Embedding
-      - EMBEDDING_API_URL=http://infinity:8001
-      # Qdrant
-      - QDRANT_URL=http://qdrant:6333
-      # PostgreSQL
-      - DB_HOST=postgres
-      - DB_PORT=5432
-      - DB_USER=${DB_USER}
-      - DB_PASSWORD=${DB_PASSWORD}
-      - DB_NAME=${DB_NAME}
-      # S3/MinIO
-      - S3_ENDPOINT=http://minio:9000
-      - S3_ACCESS_KEY=${S3_ACCESS_KEY}
-      - S3_SECRET_KEY=${S3_SECRET_KEY}
-      - S3_REGION=${S3_REGION}
-      # Whisper
-      - WHISPER_URL=http://whisper:8000
-      # Gotenberg
+      - DATABASE_URL=postgresql://chunkydonkey:chunkydonkey@postgres:5432/chunkydonkey
       - GOTENBERG_URL=http://gotenberg:3000
+      - BROWSERLESS_URL=ws://browserless:3000
+      - S3_ENDPOINT_URL=http://seaweedfs:8333
+      - MAX_FILE_SIZE=104857600
+      - API_KEY=${CHUNKYDONKEY_API_KEY:-}
     volumes:
-      - hf_cache:/root/.cache/huggingface
       - ./src:/app/src
+      - ./schema.sql:/app/schema.sql
     ports:
-      - "${FATINGEST_PORT}:5000"
+      - "${API_PORT:-5000}:5000"
     depends_on:
-      qdrant:
-        condition: service_healthy
       postgres:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
-      whisper:
         condition: service_healthy
       gotenberg:
         condition: service_healthy
-      vllm:
+      browserless:
         condition: service_healthy
-    command: ["uvicorn", "src.fatingest.main:app", "--host", "0.0.0.0", "--port", "5000", "--reload"]
+      seaweedfs:
+        condition: service_healthy
+    command: ["uvicorn", "src.chunkydonkey.main:app", "--host", "0.0.0.0", "--port", "5000", "--reload"]
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:5000/health')\""]
       interval: 10s
@@ -198,10 +119,13 @@ services:
       retries: 5
     restart: unless-stopped
 
-
 volumes:
-  hf_cache:
-  qdrant_data:
-  postgres_data:
-  minio_data:
-  ollama_data:
+  pgdata:
+  seaweeddata:
+
+networks:
+  proxy:
+    external: true
+    name: caddy_proxy
+  internal:
+    driver: bridge

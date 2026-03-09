@@ -1,22 +1,23 @@
 [project]
-name = "fatingest"
+name = "chunkydonkey"
 version = "0.1.0"
-description = "Take it all in."
-readme = "README.md"
+description = "Document ingestion pipeline: any file in, markdown chunks out, stored in PostgreSQL with pgvector."
 requires-python = ">=3.12"
 dependencies = [
-    "polars",
-    "uvicorn",
-    "filetype",
-    "aioboto3",
-    "botocore",
-    "dotenv",
+    "asyncpg",
     "clevercsv",
-    "httpx",
-    "markdown",
-    "openai",
     "fastapi",
-    "python-multipart"
+    "filetype",
+    "httpx",
+    "openai",
+    "playwright",
+    "polars",
+    "pymupdf",
+    "pymupdf4llm",
+    "python-multipart",
+    "trafilatura",
+    "uvicorn",
+    "xml",
 ]
 
 [build-system]

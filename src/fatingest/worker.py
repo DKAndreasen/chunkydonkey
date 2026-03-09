@@ -1,1 +1,0 @@
-# src/fatingest/worker.py

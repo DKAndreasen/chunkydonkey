@@ -1,34 +1,23 @@
-# Slim image
 FROM python:3.12-slim
 
-# Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app
 
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    poppler-utils ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install 'uv'
+# Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
-# Copy dependency files
+# Install Python deps
 COPY pyproject.toml uv.lock ./
-
-# Install dependencies via uv
-# We use --system to install into the environment provided by the base image
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r pyproject.toml
 
-# Copy the source code folder keeping the structure
-# Result: /app/src/main.py exists
+# Copy source + schema
 COPY src ./src
+COPY schema.sql ./schema.sql
 
 EXPOSE 5000
 
-# We use src.main because the file is located at /app/src/main.py
-CMD ["uvicorn", "src.fatingest.main:app", "--host", "0.0.0.0", "--port", "5000"]
+CMD ["uvicorn", "src.chunkydonkey.main:app", "--host", "0.0.0.0", "--port", "5000"]
