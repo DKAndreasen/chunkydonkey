@@ -120,7 +120,7 @@ def pdf_to_chunks(file: bytes):
                         img_data = doc.extract_image(xref)
                         sha256 = hashlib.sha256(img_data["image"]).hexdigest()
                         images[sha256] = img_data["image"]
-                        output.append((block["bbox"], f"![image]({sha256})"))
+                        output.append((block["bbox"], f"![]({sha256})"))
                     continue
 
                 # Check if this text block is inside a table

@@ -57,4 +57,7 @@ def html_to_markdown(file: bytes, base_url: str | None = None):
         h.body_width = 0
         markdown = h.handle(html)
 
+    # Strip trafilatura-safe wrapper from image placeholders
+    markdown = re.sub(r'chunkydonkey/([a-f0-9]{64})\.jpg', r'\1', markdown)
+
     return markdown.encode("utf-8"), images, meta
