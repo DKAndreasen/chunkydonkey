@@ -1,4 +1,3 @@
-import hashlib
 import re
 from urllib.parse import urljoin
 
@@ -23,11 +22,9 @@ def markdown_to_chunks(file: bytes, base_url: str | None = None):
                 return ""
             else:
                 return m.group(0)
-        # Hash and collect images
+        # Collect external image URLs for downstream processing
         if is_image and src.startswith(("http://", "https://")):
-            sha256 = hashlib.sha256(src.encode("utf-8")).hexdigest()
-            images[sha256] = src
-            return f"![{text}]({sha256})"
+            images[src] = src
         return f"{bang}[{text}]({src})"
 
     markdown = MD_REF_RE.sub(replacer, markdown)

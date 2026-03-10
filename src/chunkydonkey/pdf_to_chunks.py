@@ -25,23 +25,27 @@ def pdf_to_chunks(file: bytes):
                 size = round(spans[0]["size"], 1)
                 size_counter[size] += len(spans)
 
-        body_size = size_counter.most_common(1)[0][0]
+        if not size_counter:
+            body_size = 0
+            size_to_level = {}
+        else:
+            body_size = size_counter.most_common(1)[0][0]
 
-        for pd in page_dicts:
-            for block in pd["blocks"]:
-                if block["type"] != 0:
-                    continue
-                spans = [s for l in block["lines"] for s in l["spans"] if s["text"].strip()]
-                if not spans:
-                    continue
-                size = round(spans[0]["size"], 1)
-                bold = all(s["flags"] & 2**4 for s in spans)
-                if size > body_size:
-                    header_sizes.add(size)
-                elif bold and len(block["lines"]) <= 2:
-                    header_sizes.add(body_size + 0.01)
+            for pd in page_dicts:
+                for block in pd["blocks"]:
+                    if block["type"] != 0:
+                        continue
+                    spans = [s for l in block["lines"] for s in l["spans"] if s["text"].strip()]
+                    if not spans:
+                        continue
+                    size = round(spans[0]["size"], 1)
+                    bold = all(s["flags"] & 2**4 for s in spans)
+                    if size > body_size:
+                        header_sizes.add(size)
+                    elif bold and len(block["lines"]) <= 2:
+                        header_sizes.add(body_size + 0.01)
 
-        size_to_level = {s: i + 1 for i, s in enumerate(sorted(header_sizes, reverse=True)[:3])}
+            size_to_level = {s: i + 1 for i, s in enumerate(sorted(header_sizes, reverse=True)[:3])}
 
         # Pass 2: extract pages as chunks
         chunks = []

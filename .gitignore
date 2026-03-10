@@ -1,7 +1,6 @@
-.claude/
-.venv/
-local_tests/
-__pycache__/
+.claude
+.venv
 .env
+local_tests
+__pycache__
 gotenberg/fonts/*
-PROJECT.md

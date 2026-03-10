@@ -15,18 +15,17 @@ MAX_TOTAL_SIZE = MAX_FILE_SIZE * 10
 MAX_DEPTH = 5
 
 
-def archive_to_files(data: bytes, prefix: str = "", _depth: int = 0, _budget: list | None = None) -> list[tuple[str, bytes]]:
-    """Recursively extract archive. Returns [(path, bytes), ...] with nested archives flattened."""
+def archive_to_files(data: bytes, prefix: str = "", _depth: int = 0, _budget: list | None = None) -> tuple[list[tuple[str, bytes]], dict]:
     if _budget is None:
         _budget = [MAX_TOTAL_SIZE]
 
     if _depth > MAX_DEPTH:
         logger.warning(f"Max archive depth {MAX_DEPTH} exceeded, skipping")
-        return []
+        return [], {}
 
     ft = filetype.guess(data)
     if not ft:
-        return []
+        return [], {}
 
     files = []
 
@@ -40,11 +39,11 @@ def archive_to_files(data: bytes, prefix: str = "", _depth: int = 0, _budget: li
                 _budget[0] -= len(data)
                 if _budget[0] < 0:
                     logger.warning(f"Total extracted size exceeds {MAX_TOTAL_SIZE}, stopping")
-                    return []
-                return [(prefix.rstrip("/"), data)]
+                    return [], {}
+                return [(prefix.rstrip("/"), data)], {'num_files': 1}
         except Exception as e:
             logger.warning(f"Failed extracting gz: {e}")
-            return []
+            return [], {}
 
     if ft.extension == "zip":
         try:
@@ -55,8 +54,12 @@ def archive_to_files(data: bytes, prefix: str = "", _depth: int = 0, _budget: li
                     clean = sanitize_path(name)
                     if not clean:
                         continue
-                    with z.open(name) as f:
-                        file_bytes = safe_read(f, min(MAX_FILE_SIZE, _budget[0]))
+                    try:
+                        with z.open(name) as f:
+                            file_bytes = safe_read(f, min(MAX_FILE_SIZE, _budget[0]))
+                    except ValueError:
+                        logger.warning(f"Skipping {clean}: exceeds size limit")
+                        continue
                     _budget[0] -= len(file_bytes)
                     if _budget[0] < 0:
                         logger.warning(f"Total extracted size exceeds {MAX_TOTAL_SIZE}, stopping")
@@ -77,7 +80,11 @@ def archive_to_files(data: bytes, prefix: str = "", _depth: int = 0, _budget: li
                     f = t.extractfile(member)
                     if not f:
                         continue
-                    file_bytes = safe_read(f, min(MAX_FILE_SIZE, _budget[0]))
+                    try:
+                        file_bytes = safe_read(f, min(MAX_FILE_SIZE, _budget[0]))
+                    except ValueError:
+                        logger.warning(f"Skipping {clean}: exceeds size limit")
+                        continue
                     _budget[0] -= len(file_bytes)
                     if _budget[0] < 0:
                         logger.warning(f"Total extracted size exceeds {MAX_TOTAL_SIZE}, stopping")
@@ -91,11 +98,11 @@ def archive_to_files(data: bytes, prefix: str = "", _depth: int = 0, _budget: li
     for path, file_bytes in files:
         child_ft = filetype.guess(file_bytes)
         if child_ft and child_ft.extension in ("zip", "gz", "tar"):
-            result.extend(archive_to_files(file_bytes, prefix=f"{path}/", _depth=_depth + 1, _budget=_budget))
+            result.extend(archive_to_files(file_bytes, prefix=f"{path}/", _depth=_depth + 1, _budget=_budget)[0])
         else:
             result.append((path, file_bytes))
 
-    return result
+    return result, {'num_files': len(result)}
 
 
 def safe_read(f, max_size: int) -> bytes:
