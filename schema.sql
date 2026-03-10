@@ -18,8 +18,7 @@ CREATE TABLE files (
     meta          JSONB DEFAULT '{}',
     markdown      TEXT,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    indexed_at    TIMESTAMPTZ,
-    touched_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    indexed_at    TIMESTAMPTZ
 );
 
 CREATE INDEX idx_files_unfinished ON files(created_at) WHERE indexed_at IS NULL;
@@ -50,13 +49,14 @@ CREATE INDEX idx_url_files_sha256 ON url_files(file_sha256);
 -- Access control is handled at query time by filtering on source.
 -- Multiple sources can point to the same file (dedup via sha256).
 -- url is set for URL-based sources (refreshable), NULL for direct file uploads.
+-- FK is RESTRICT: cannot delete a file while sources still reference it.
 -- On re-fetch with new content, file_sha256 is updated; orphan cleanup handles the old file.
 -- ============================================================
 CREATE TABLE sources (
     source       TEXT NOT NULL,
     source_id    TEXT NOT NULL,
-    file_sha256  TEXT NOT NULL REFERENCES files(sha256) ON DELETE CASCADE,
-    url          TEXT,
+    file_sha256  TEXT NOT NULL REFERENCES files(sha256),
+    url          TEXT REFERENCES url_files(url),
     meta         JSONB DEFAULT '{}',
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     touched_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -69,12 +69,13 @@ CREATE INDEX idx_sources_sha256 ON sources(file_sha256);
 -- File → File mapping (containment)
 --
 -- Archives contain files, documents contain images, videos contain stills.
--- ON DELETE CASCADE on both sides: parent or child deleted →
--- relationship removed. Orphan children cleaned up by next sweep.
+-- ON DELETE CASCADE on parent: parent deleted → relationship removed →
+-- children become orphans, cleaned up by next sweep.
+-- Child FK is RESTRICT: cannot delete a child still owned by a parent.
 -- ============================================================
 CREATE TABLE file_files (
     parent_sha256  TEXT NOT NULL REFERENCES files(sha256) ON DELETE CASCADE,
-    child_sha256   TEXT NOT NULL REFERENCES files(sha256) ON DELETE CASCADE,
+    child_sha256   TEXT NOT NULL REFERENCES files(sha256),
     meta           JSONB DEFAULT '{}',
     PRIMARY KEY (parent_sha256, child_sha256)
 );
