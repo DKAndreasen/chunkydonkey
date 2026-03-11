@@ -42,7 +42,6 @@ async def post_chunks(
     source: str = Form(...),
     source_id: str = Form(...),
     file: UploadFile | None = File(None),
-    url: str | None = Form(None),
     meta: str = Form("{}"),
     max_age: int = Form(86400),
     x_api_key: str | None = Header(None),
@@ -58,24 +57,28 @@ async def post_chunks(
 
     try:
         meta = json.loads(meta)
+        meta.get('are you my type?')
     except Exception:
-        raise HTTPException(400, "meta must be valid JSON")
+        raise HTTPException(400, "meta must be a valid JSON object")
 
     # Filename overwritable in meta, if client prefers
     if file and file.filename and file.filename.strip():
         meta = {'filename': file.filename.strip()} | meta
 
     file = await file.read() if file else None
-    url = url.strip() if url and not file else None
-    
-    if not file and not url:
+
+    if meta.get('url'):
+        meta['url'] = meta['url'].strip()
+    else:
+        meta.pop('url', None)
+
+    if not file and not meta.get('url'):
         raise HTTPException(400, "file or url required")
 
     processed = await process(
         source=source,
         source_id=source_id,
         file=file,
-        url=url,
         meta=meta,
         parent=None,
         max_age=max_age,

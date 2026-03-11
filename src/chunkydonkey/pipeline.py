@@ -7,19 +7,18 @@ from . import utils
 from . import storage
 from .url_to_file import url_to_file
 from .archive_to_files import archive_to_files
-from .image_to_chunks import image_to_chunks
+from .image_to_markdown import image_to_markdown
 from .office_to_pdf import office_to_pdf
-from .pdf_to_chunks import pdf_to_chunks
-from .tabular_to_chunks import tabular_to_chunks
+from .pdf_to_markdown import pdf_to_markdown
+from .tabular_to_markdown import tabular_to_markdown
 from .html_to_markdown import html_to_markdown
-from .markdown_to_chunks import markdown_to_chunks
+from .markdown_to_markdown import markdown_to_markdown
 
 
 async def process(
     source: str | None,
     source_id: str | None,
     file: bytes | None,
-    url: str | None,
     meta: dict | None,
     parent: str | None,
     max_age: int = 86400, # 24 hrs default
@@ -27,12 +26,13 @@ async def process(
 
     # URL route, if no file given (crash loudly if no URL either)
     if not file:
-        sha256 = await db.get_sha256_from_url(url, max_age)
+        sha256 = await db.get_sha256_from_url(meta.get('url'), max_age)
         if not sha256:
-            file, resolved_url = await url_to_file(url)
+            file, resolved_url = await url_to_file(meta.get('url'))
             sha256 = hashlib.sha256(file).hexdigest()
-            await db.upsert_url(url, resolved_url, sha256)
+            await db.upsert_url(meta.get('url'), resolved_url, sha256)
     else:
+        meta.pop('url', None) # ensure no URL when file to avoid confusion
         sha256 = hashlib.sha256(file).hexdigest()
 
     # Upsert source relation, if directly from client
@@ -41,7 +41,6 @@ async def process(
             source=source,
             source_id=source_id,
             file_sha256=sha256,
-            url=url,
             meta=meta,
         )
 
@@ -69,26 +68,24 @@ async def process(
                     source=None,
                     source_id=None,
                     file=child[1],
-                    url=None,
-                    meta={'filename': child[0]},
+                    meta={'index': 'parent', 'filename': child[0]},
                     parent=sha256,
                 )
                 for child in child_files
             ])
-            return await finalize(sha256, meta, [])
+            return await finalize(sha256, meta)
 
     # Save original file (re-saved with correct content_type in finalize)
     await storage.save(sha256, file)
 
-    # Init accumulative file meta and images
+    # Init accumulative file meta
     meta = {}
-    images = {}
 
     # Image route
     if ft and ft.mime[:6] == 'image/':
-        chunks, image_meta = await image_to_chunks(file, ft)
+        markdown, image_meta = await image_to_markdown(file, ft)
         meta = image_meta | meta
-        return await finalize(sha256, meta, chunks, file=file, images=[sha256])
+        return await finalize(sha256, meta, markdown, file=file)
 
     # Office route (rich text, presentations, spreadsheets)
     if ft and ft.extension in ('doc', 'docx', 'ppt', 'pptx', 'odp', 'xls', 'xlsx', 'ods'):
@@ -100,73 +97,69 @@ async def process(
 
     # PDF route
     if ft and ft.extension == 'pdf':
-        chunks, pdf_images, pdf_meta = await asyncio.to_thread(pdf_to_chunks, file)
-        images |= pdf_images
-        process_images(images.values(), sha256, max_age)
+        markdown, images, pdf_meta = await asyncio.to_thread(pdf_to_markdown, file)
+        process_images(images, sha256, max_age)
         meta = pdf_meta | meta
-        return await finalize(sha256, meta, chunks, file=file, images=list(images.keys()))
+        return await finalize(sha256, meta, markdown, file=file)
 
     # Ensure uniform encoding and line separation, if text
     file = await asyncio.to_thread(utils.normalize_text, file)
 
     # Tabular route (parquet, json, csv)
     try:
-        chunks, tabular_meta = await asyncio.to_thread(tabular_to_chunks, file)
+        markdown, tabular_meta = await asyncio.to_thread(tabular_to_markdown, file)
         meta = tabular_meta | meta
-        return await finalize(sha256, meta, chunks, file=file)
+        return await finalize(sha256, meta, markdown, file=file)
     except Exception:
         pass
 
     # HTML route
     try:
-        file, html_images, html_meta = await asyncio.to_thread(html_to_markdown, file)
-        images |= html_images
+        file, images, html_meta = await asyncio.to_thread(html_to_markdown, file)
+        process_images(images, sha256, max_age)
         meta = html_meta | meta
     except Exception:
         pass
 
-    # Markdown route (including plain text)
+    # Markdown route (any utf-8-decodable txt)
     try:
-        chunks, markdown_images, markdown_meta = await asyncio.to_thread(markdown_to_chunks, file)
-        images |= markdown_images
-        process_images(images.values(), sha256, max_age)
+        markdown, images, markdown_meta = await asyncio.to_thread(markdown_to_markdown, file)
+        process_images(images, sha256, max_age)
         meta = markdown_meta | meta
-        return await finalize(sha256, meta, chunks, file=file, images=list(images.keys()))
+        return await finalize(sha256, meta, markdown, file=file)
     except Exception:
         pass
 
     # Unknown/Error route
-    return await finalize(sha256, {'content_type': 'unknown'}, [])
-    
+    return await finalize(sha256, {'content_type': 'unknown'})
 
-def process_images(images: list, sha256: str, max_age: int):
+
+def process_images(images: set, sha256: str, max_age: int):
     for image in images:
         asyncio.create_task(
             process(
                 source=None,
                 source_id=None,
                 file=image if isinstance(image, bytes) else None,
-                url=image if isinstance(image, str) else None,
-                meta=None,
+                meta={'index': 'child'} | ({'url': image} if isinstance(image, str) else {}),
                 parent=sha256,
                 max_age=max_age,
             )
         )
 
 
-async def finalize(sha256: str, meta: dict, chunks: list, file: bytes | None = None, images: list | None = None):
-    if chunks:
-        chunks = [utils.linkify_urls(chunk) for chunk in chunks]
-        links = [link for chunk in chunks for link in utils.extract_urls(chunk)]
+async def finalize(sha256: str, meta: dict, markdown: str | None = None, file: bytes | None = None):
+    if markdown:
+        markdown = utils.linkify_urls(markdown)
+        links = utils.extract_urls(markdown)
         if links:
             meta['links'] = links
-        if images:
-            meta['images'] = images
+    # Update file with correct content type
     if file:
         await storage.save(sha256, file, meta.get('content_type', 'application/octet-stream'))
+    # Or delete file if archive or unknown
     else:
         await storage.delete(sha256)
-    await db.upsert_file(sha256, meta, chunks)
-    final = await db.get_file_from_sha256(sha256)
-    await db.update_image_chunks(chunks=final['chunks'], images=images)
-    return final
+    await db.upsert_file(sha256, meta, markdown)
+    
+    return await db.get_file_from_sha256(sha256)

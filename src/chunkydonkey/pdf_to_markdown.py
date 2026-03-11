@@ -3,9 +3,12 @@ import pymupdf
 import re
 from collections import Counter
 
+TABLE_LINE_RE = re.compile(r'^\|.+\|$')
+SEP_LINE_RE = re.compile(r'^\|[-| :]+\|$')
 
-def pdf_to_chunks(file: bytes):
-    images = {}
+
+def pdf_to_markdown(file: bytes):
+    images = set()
 
     with pymupdf.open(stream=file) as doc:
         # Pass 1: cache page dicts, detect body size + header levels
@@ -47,8 +50,8 @@ def pdf_to_chunks(file: bytes):
 
             size_to_level = {s: i + 1 for i, s in enumerate(sorted(header_sizes, reverse=True)[:3])}
 
-        # Pass 2: extract pages as chunks
-        chunks = []
+        # Pass 2: extract pages
+        pages = []
         for page, page_dict in zip(doc, page_dicts):
             links = page.get_links()
             image_info = page.get_image_info(xrefs=True)
@@ -123,7 +126,7 @@ def pdf_to_chunks(file: bytes):
                     if xref:
                         img_data = doc.extract_image(xref)
                         sha256 = hashlib.sha256(img_data["image"]).hexdigest()
-                        images[sha256] = img_data["image"]
+                        images.add(img_data["image"])
                         output.append((block["bbox"], f"![]({sha256})"))
                     continue
 
@@ -184,9 +187,47 @@ def pdf_to_chunks(file: bytes):
                 else:
                     parts.append(text)
 
-            chunks.append("\n\n".join(parts))
+            pages.append("\n\n".join(parts))
+
+        # Fix tables continuing across pages
+        pages = merge_cross_page_tables(pages)
+
+        # Merge pages with separator comment
+        markdown = ("\n".join(
+            f"<!--page:{i+1}-->\n{page.strip()}"
+            for i, page in enumerate(pages)
+        )).strip()
 
         meta = {'content_type': 'application/pdf'}
         meta |= doc.metadata or {}
 
-    return chunks, images, meta
+    return markdown, images, meta
+
+
+def merge_cross_page_tables(pages):
+    """Normalize cross-page table continuations with correct headers."""
+    for i in range(len(pages) - 1):
+        a = pages[i].rstrip().split('\n')
+        b = pages[i + 1].lstrip().split('\n')
+        if not TABLE_LINE_RE.match(a[-1].strip()):
+            continue
+        if len(b) < 3 or not TABLE_LINE_RE.match(b[0].strip()) or not SEP_LINE_RE.match(b[1].strip()):
+            continue
+        # Find page i's table header (line before separator)
+        header = None
+        for k in range(len(a) - 1, -1, -1):
+            if SEP_LINE_RE.match(a[k].strip()) and k > 0:
+                header = a[k - 1]
+                break
+            if not TABLE_LINE_RE.match(a[k].strip()):
+                break
+        if not header or header.count('|') != b[0].count('|'):
+            continue
+        if header.strip() == b[0].strip():
+            continue  # header already repeated correctly
+        # Replace fake header with real one, demote fake to data row
+        fake = b[0]
+        b[0] = header
+        b.insert(2, fake)
+        pages[i + 1] = '\n'.join(b)
+    return pages

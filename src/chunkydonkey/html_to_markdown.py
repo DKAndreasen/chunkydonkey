@@ -16,7 +16,7 @@ def html_to_markdown(file: bytes, base_url: str | None = None):
     html = file.decode("utf-8")
 
     # Extract base64 images
-    images = {}
+    images = set()
     def replacer(m):
         prefix, quote, img_type, b64_data = m.group(1), m.group(2), m.group(3), m.group(4)
         try:
@@ -24,7 +24,7 @@ def html_to_markdown(file: bytes, base_url: str | None = None):
         except Exception:
             return m.group(0)
         sha256 = hashlib.sha256(img_bytes).hexdigest()
-        images[sha256] = img_bytes
+        images.add(img_bytes)
         return f"{prefix}{quote}chunkydonkey/{sha256}.jpg{quote}"
 
     html = DATA_URI_RE.sub(replacer, html)
@@ -52,7 +52,7 @@ def html_to_markdown(file: bytes, base_url: str | None = None):
     
     # Fragment, inline HTML, or plain text → html2text
     else:
-        meta = {}
+        meta = {'content_type': 'text/markdown'}
         h = html2text.HTML2Text()
         h.body_width = 0
         markdown = h.handle(html)

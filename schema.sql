@@ -10,18 +10,20 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 -- sha256 keys the raw file in object storage (SeaweedFS).
 -- markdown is the converted source of truth (NULL for archives).
 -- meta holds extracted metadata (content_type, dimensions, etc).
--- State: created_at exists, indexed_at means chunks are derived.
--- On restart, re-index anything with created_at but no indexed_at.
+-- State: created_at → parsed_at (markdown ready) → indexed_at (chunks derived).
+-- Indexing requires parsed_at on self AND all children in file_files.
+-- On restart, re-index anything with parsed_at but no indexed_at.
 -- ============================================================
 CREATE TABLE files (
     sha256        TEXT PRIMARY KEY,
     meta          JSONB DEFAULT '{}',
     markdown      TEXT,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    parsed_at     TIMESTAMPTZ,
     indexed_at    TIMESTAMPTZ
 );
 
-CREATE INDEX idx_files_unfinished ON files(created_at) WHERE indexed_at IS NULL;
+CREATE INDEX idx_files_unindexed ON files(parsed_at) WHERE parsed_at IS NOT NULL AND indexed_at IS NULL;
 
 -- ============================================================
 -- URL → File resolution cache
@@ -48,7 +50,7 @@ CREATE INDEX idx_url_files_sha256 ON url_files(file_sha256);
 --
 -- Access control is handled at query time by filtering on source.
 -- Multiple sources can point to the same file (dedup via sha256).
--- url is set for URL-based sources (refreshable), NULL for direct file uploads.
+-- meta['url'] is set for URL-based sources (refreshable via url_files).
 -- FK is RESTRICT: cannot delete a file while sources still reference it.
 -- On re-fetch with new content, file_sha256 is updated; orphan cleanup handles the old file.
 -- ============================================================
@@ -56,7 +58,6 @@ CREATE TABLE sources (
     source       TEXT NOT NULL,
     source_id    TEXT NOT NULL,
     file_sha256  TEXT NOT NULL REFERENCES files(sha256),
-    url          TEXT REFERENCES url_files(url),
     meta         JSONB DEFAULT '{}',
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     touched_at   TIMESTAMPTZ NOT NULL DEFAULT now(),

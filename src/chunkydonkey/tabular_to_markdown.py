@@ -3,7 +3,7 @@ import io
 import polars as pl
 
 
-def tabular_to_chunks(file: bytes):
+def tabular_to_markdown(file: bytes):
 
     try: # Parquet?
         df = pl.read_parquet(io.BytesIO(file))
@@ -62,27 +62,10 @@ def tabular_to_chunks(file: bytes):
         for c in df.columns
     ])
 
-    # Partition into chunks and create meta
-    chunks = split_tabular(df)
     meta |= {"num_rows": df.height, "num_cols": len(df.columns), "columns": df.columns}
+    markdown = df_to_markdown(df)
 
-    return chunks, meta
-
-
-def split_tabular(df: pl.DataFrame, target_size: int = 8000):
-    max_rows = min(100, df.height)
-    chunks = []
-    start = 0
-    while start < df.height:
-        chunk_df = df.slice(start, max_rows)
-        md = tabular_to_markdown(chunk_df)
-        if len(md) > target_size and chunk_df.height > 1:
-            max_rows = max(1, int(chunk_df.height * target_size / len(md)))
-            continue
-        chunks.append(md)
-        start += chunk_df.height
-        max_rows = max(1, min(100, df.height - start))
-    return chunks
+    return markdown, meta
 
 
 def flatten_df(df: pl.DataFrame) -> pl.DataFrame:
@@ -112,7 +95,7 @@ def stringify_list_value(values) -> str:
     return ", ".join("" if value is None else str(value) for value in values)
     
 
-def tabular_to_markdown(df: pl.DataFrame) -> str:
+def df_to_markdown(df: pl.DataFrame) -> str:
     lines = [" | ".join(df.columns), " | ".join("-" for _ in df.columns)]
     for row in df.iter_rows():
         cells = [format_tabular_cell(value) for value in row]
