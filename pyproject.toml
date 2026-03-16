@@ -17,7 +17,7 @@ dependencies = [
     "python-multipart",
     "trafilatura",
     "uvicorn",
-    "xml",
+    "lxml",
 ]
 
 [build-system]
