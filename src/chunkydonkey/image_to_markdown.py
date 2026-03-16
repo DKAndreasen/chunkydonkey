@@ -13,7 +13,7 @@ API_KEY = os.getenv("VLM_API_KEY")
 MODEL = os.getenv("VLM_MODEL")
 CONNECT_TIMEOUT = float(os.getenv("VLM_CONNECT_TIMEOUT", "30"))
 RESPONSE_TIMEOUT = float(os.getenv("VLM_RESPONSE_TIMEOUT", "300"))
-SYSTEM_PROMPT = (Path(__file__).parent / "prompts" / "image_to_markdown.md").read_text().strip()
+SYSTEM_PROMPT = (Path(__file__).parent / "prompts" / "image_to_chunks.md").read_text().strip()
 
 client = AsyncOpenAI(
     base_url=BASE_URL,
