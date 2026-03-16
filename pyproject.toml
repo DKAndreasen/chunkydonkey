@@ -18,6 +18,8 @@ dependencies = [
     "trafilatura",
     "uvicorn",
     "lxml",
+    "aioboto3>=15.5.0",
+    "pillow>=12.1.1",
 ]
 
 [build-system]
