@@ -128,7 +128,7 @@ _taken from [deepwiki](https://deepwiki.com/jakobmwang/chunkydonkey/1-overview#s
 >     CHUNKS_TBL --> INDEX_TRGM
 >     CHUNKS_TBL --> FILECHUNKS_TBL
 >     
->     FILES_TBL -.."original bytes".-> RAWFILES
+>     FILES_TBL -..original bytes.-> RAWFILES
 > ```
 > 
 > | Storage System | Data Type | Purpose | Key Structure |
